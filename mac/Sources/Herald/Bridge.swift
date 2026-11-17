@@ -6,7 +6,7 @@ import CryptoKit
 import UserNotifications
 import Vision
 
-// PhoneBridge —— Mac 端
+// Herald —— Mac 端
 //
 // 作用：接收安卓手机推来的通知（短信、微信、验证码…），在菜单栏里看，
 // 不用碰手机；顺带内置 TOTP（Google Authenticator 那类验证码）生成。
@@ -58,8 +58,14 @@ struct TotpAccount: Codable, Identifiable {
 
 enum Paths {
     static let support: String = {
-        let p = NSHomeDirectory() + "/Library/Application Support/PhoneBridge"
-        try? FileManager.default.createDirectory(atPath: p, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        let p = NSHomeDirectory() + "/Library/Application Support/Herald"
+        // 从旧名迁移一次：改名不该丢历史通知和验证器
+        let legacy = NSHomeDirectory() + "/Library/Application Support/PhoneBridge"
+        if !fm.fileExists(atPath: p), fm.fileExists(atPath: legacy) {
+            try? fm.moveItem(atPath: legacy, toPath: p)
+        }
+        try? fm.createDirectory(atPath: p, withIntermediateDirectories: true)
         return p
     }()
     static var totpFile: String { support + "/totp.json" }
@@ -142,8 +148,6 @@ final class Bridge: NSObject, ObservableObject {
     @Published var connected = false
     @Published var linkName = "未连接"
     @Published var totp: [TotpAccount] = []
-    /// 收到验证码时自动写进剪贴板
-    @Published var autoCopyCode: Bool = UserDefaults.standard.bool(forKey: "autoCopyCode")
     /// 应用层加密的配对码（Mac 生成，手机粘贴一次）
     @Published var pairCode: String = Secure.loadOrCreateCode()
     @Published var lastDecryptFailed = false
@@ -208,11 +212,6 @@ final class Bridge: NSObject, ObservableObject {
         if let d = try? JSONEncoder().encode(totp) {
             try? d.write(to: URL(fileURLWithPath: Paths.totpFile), options: .atomic)
         }
-    }
-
-    func setAutoCopy(_ on: Bool) {
-        autoCopyCode = on
-        UserDefaults.standard.set(on, forKey: "autoCopyCode")
     }
 
     /// 删除单条
@@ -338,10 +337,6 @@ final class Bridge: NSObject, ObservableObject {
             self.onChange?()
             self.postBanner(n)
             if let id = n.msgId { self.sendAck(id) }
-            if self.autoCopyCode, let code = n.code {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(code, forType: .string)
-            }
         }
     }
 
@@ -444,14 +439,14 @@ final class Bridge: NSObject, ObservableObject {
             l.start(queue: .main)
             listener = l
         } catch {
-            NSLog("PhoneBridge TCP 监听失败: %@", String(describing: error))
+            NSLog("Herald TCP 监听失败: %@", String(describing: error))
         }
     }
 
     private func receive(on conn: NWConnection) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, done, error in
             guard let self else { return }
-            NSLog("PhoneBridge recv %d bytes done=%d err=%@", data?.count ?? -1, done ? 1 : 0,
+            NSLog("Herald recv %d bytes done=%d err=%@", data?.count ?? -1, done ? 1 : 0,
                   error.map { String(describing: $0) } ?? "-")
             if let data, !data.isEmpty {
                 Dbg.log("recv \(data.count) bytes")

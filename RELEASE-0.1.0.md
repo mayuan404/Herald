@@ -1,29 +1,29 @@
-# PhoneBridge 0.1.0
+# Herald 0.1.0
 
 > 把安卓手机的通知直接送到 Mac 菜单栏，**不经过任何服务器**；顺带内置 TOTP 验证器。
 
-- **下载**：`PhoneBridge-0.1.0.apk`（安卓） / `PhoneBridge-0.1.0-macOS.dmg`（Mac）
+- **下载**：`Herald-0.1.0.apk`（安卓） / `Herald-0.1.0-macOS.dmg`（Mac）
 - **要求**：Android 8+；macOS 13+（Apple Silicon / Intel）
 - **校验**：
   ```
-  e77582936d48e8f16867b28c9cd931b82096b8c223479c0c7259bc24bda5db2a  PhoneBridge-0.1.0.apk
-  6452df06dee72b78d4e9dbbefa1f61e351eb879c23d5946252f138f5977b1975  PhoneBridge-0.1.0-macOS.dmg
+  e77582936d48e8f16867b28c9cd931b82096b8c223479c0c7259bc24bda5db2a  Herald-0.1.0.apk
+  6452df06dee72b78d4e9dbbefa1f61e351eb879c23d5946252f138f5977b1975  Herald-0.1.0-macOS.dmg
   ```
 
 ## 安装
 
 **Mac**
 
-1. 打开 DMG，把 `PhoneBridge.app` 拖进「应用程序」；
+1. 打开 DMG，把 `Herald.app` 拖进「应用程序」；
 2. 首次启动：**右键 → 打开**（ad-hoc 签名，Gatekeeper 会拦一次）；
 3. 菜单栏出现手机图标即表示正在扫描。
 
 **安卓**
 
 1. 安装 APK（debug 签名，需要允许「安装未知来源应用」）；
-2. 打开后点「授予通知读取权限」→ 在系统列表勾选 PhoneBridge；
+2. 打开后点「授予通知读取权限」→ 在系统列表勾选 Herald；
 3. 点「启动后台服务」；
-4. **省电设置（关键）**：设置 → 应用管理 → PhoneBridge → 省电策略 → **无限制**；自启动 → 允许；最近任务里加锁。
+4. **省电设置（关键）**：设置 → 应用管理 → Herald → 省电策略 → **无限制**；自启动 → 允许；最近任务里加锁。
 
 然后在 Mac 菜单栏「配对码」里复制 16 位码，粘到手机端保存即可。
 

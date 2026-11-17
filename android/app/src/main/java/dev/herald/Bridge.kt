@@ -1,4 +1,4 @@
-package local.phonebridge
+package dev.herald
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -34,7 +34,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
- * PhoneBridge 安卓端
+ * Herald 安卓端
  *
  * 两条直连通道，都不经过服务器：
  *   1. BLE：本机作为 GATT server 广播，Mac 端订阅后把通知推过去；
@@ -68,7 +68,7 @@ object Secure {
             val ct = cipher.doFinal(plain)
             "E1:" + android.util.Base64.encodeToString(nonce + ct, android.util.Base64.NO_WRAP)
         } catch (e: Exception) {
-            Log.e("PhoneBridge", "encrypt failed: ${e.message}")
+            Log.e("Herald", "encrypt failed: ${e.message}")
             null
         }
     }
@@ -102,7 +102,7 @@ object Link {
             events.addLast("$t  $msg")
             while (events.size > 40) events.removeFirst()
         }
-        Log.i("PhoneBridge", msg)
+        Log.i("Herald", msg)
     }
 
     fun recentEvents(): List<String> = synchronized(events) { events.toList() }
@@ -398,7 +398,7 @@ class BridgeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Link.pairCode = getSharedPreferences("phonebridge", MODE_PRIVATE)
+        Link.pairCode = getSharedPreferences("herald", MODE_PRIVATE)
             .getString("pairCode", "") ?: ""
         Link.running = true
         startForegroundWithChannel()
@@ -407,16 +407,16 @@ class BridgeService : Service() {
     }
 
     private fun startForegroundWithChannel() {
-        val id = "phonebridge"
+        val id = "herald"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
             if (nm.getNotificationChannel(id) == null) {
                 nm.createNotificationChannel(
-                    NotificationChannel(id, "PhoneBridge", NotificationManager.IMPORTANCE_MIN)
+                    NotificationChannel(id, "Herald", NotificationManager.IMPORTANCE_MIN)
                 )
             }
             val n = Notification.Builder(this, id)
-                .setContentTitle("PhoneBridge 运行中")
+                .setContentTitle("Herald 运行中")
                 .setContentText("通知会转发到 Mac，不上传任何服务器")
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
                 .build()
@@ -610,7 +610,7 @@ class NotifListener : NotificationListenerService() {
         if (title.isEmpty() && text.isEmpty()) return
 
         // 只转发用户勾选的包，默认放行短信/微信/验证器类
-        val prefs = getSharedPreferences("phonebridge", MODE_PRIVATE)
+        val prefs = getSharedPreferences("herald", MODE_PRIVATE)
         val allowed = prefs.getStringSet("packages", null)
         if (allowed != null && allowed.isNotEmpty() && !allowed.contains(sbn.packageName)) return
 

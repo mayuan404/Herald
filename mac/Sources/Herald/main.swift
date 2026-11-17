@@ -12,7 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let b = statusItem.button {
             b.image = NSImage(systemSymbolName: "iphone.radiowaves.left.and.right",
-                              accessibilityDescription: "PhoneBridge")
+                              accessibilityDescription: "Herald")
             b.image?.isTemplate = true
         }
         statusItem.button?.target = self
@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshBadge() {
         let b = statusItem.button
         b?.appearsDisabled = !Bridge.shared.connected
-        b?.toolTip = "PhoneBridge · " + Bridge.shared.linkName
+        b?.toolTip = "Herald · " + Bridge.shared.linkName
     }
 
     @objc private func togglePopover() {
@@ -76,7 +76,7 @@ struct Panel: View {
         .popover(isPresented: $showPairCode, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("手机配对码").font(.system(size: 12, weight: .semibold))
-                Text("把下面这串代码粘到手机 PhoneBridge 的「配对码」输入框里。\n两端一致后，通知内容会用 AES-GCM 加密传输。")
+                Text("把下面这串代码粘到手机 Herald 的「配对码」输入框里。\n两端一致后，通知内容会用 AES-GCM 加密传输。")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -135,7 +135,7 @@ struct Panel: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 if bridge.notes.isEmpty {
-                    Text("等待手机通知…\n\n确保手机端已授权通知读取，并保持 PhoneBridge 在后台运行。")
+                    Text("等待手机通知…\n\n确保手机端已授权通知读取，并保持 Herald 在后台运行。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -199,12 +199,6 @@ struct Panel: View {
             Button("配对码") { showPairCode.toggle() }
             Button("添加验证器…") { addTotp() }
             Button("导入验证器…") { importTotp() }
-            Toggle("自动复制", isOn: Binding(
-                get: { bridge.autoCopyCode },
-                set: { bridge.setAutoCopy($0) }
-            ))
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
             Button("清空通知") { bridge.notes.removeAll() }
             Spacer()
             Button("退出") { NSApp.terminate(nil) }
@@ -374,7 +368,7 @@ struct TotpRow: View {
     }
 }
 
-// 命令行自测：PhoneBridge --enc <pairCode> <text>  /  --dec <pairCode> <E1:...>
+// 命令行自测：Herald --enc <pairCode> <text>  /  --dec <pairCode> <E1:...>
 if let i = CommandLine.arguments.firstIndex(of: "--enc"), CommandLine.arguments.count > i + 2 {
     let code = CommandLine.arguments[i + 1]
     let text = CommandLine.arguments[i + 2]
@@ -392,7 +386,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--dec"), CommandLine.arguments.
     exit(0)
 }
 
-// 命令行自测：PhoneBridge --delete-totp <名字包含>（验证删除与持久化）
+// 命令行自测：Herald --delete-totp <名字包含>（验证删除与持久化）
 if let i = CommandLine.arguments.firstIndex(of: "--delete-totp"), CommandLine.arguments.count > i + 1 {
     let needle = CommandLine.arguments[i + 1]
     let b = Bridge.shared
@@ -402,7 +396,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--delete-totp"), CommandLine.ar
     exit(0)
 }
 
-// 命令行自测：PhoneBridge --import-qr <图片> [更多图片…]
+// 命令行自测：Herald --import-qr <图片> [更多图片…]
 if let i = CommandLine.arguments.firstIndex(of: "--import-qr") {
     let urls = CommandLine.arguments[(i + 1)...].map { URL(fileURLWithPath: $0) }
     let b = Bridge.shared
@@ -412,7 +406,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--import-qr") {
     exit(0)
 }
 
-// 命令行自测：PhoneBridge --migration <base64>
+// 命令行自测：Herald --migration <base64>
 if let i = CommandLine.arguments.firstIndex(of: "--migration"), CommandLine.arguments.count > i + 1,
    let data = Data(base64Encoded: CommandLine.arguments[i + 1]) {
     for a in MigrationParser.parse(data) {
@@ -421,7 +415,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--migration"), CommandLine.argu
     exit(0)
 }
 
-// 命令行自测：PhoneBridge --totp JBSWY3DPEHPK3PXP
+// 命令行自测：Herald --totp JBSWY3DPEHPK3PXP
 if let i = CommandLine.arguments.firstIndex(of: "--totp"), CommandLine.arguments.count > i + 1 {
     let secret = CommandLine.arguments[i + 1]
     print(TOTP.code(secret: secret) ?? "invalid")

@@ -16,7 +16,7 @@
             android:id="@+id/tvTitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="PhoneBridge"
+            android:text="Herald"
             android:textColor="@color/pb_text"
             android:textSize="26sp"
             android:textStyle="bold" />

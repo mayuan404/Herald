@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "PhoneBridge",
+    name: "Herald",
     platforms: [.macOS(.v13)],
-    targets: [.executableTarget(name: "PhoneBridge", path: "Sources/PhoneBridge")]
+    targets: [.executableTarget(name: "Herald", path: "Sources/Herald")]
 )

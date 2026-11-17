@@ -18,11 +18,11 @@
     </queries>
 
     <application
-        android:label="PhoneBridge"
+        android:label="Herald"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:allowBackup="false"
-        android:theme="@style/Theme.PhoneBridge">
+        android:theme="@style/Theme.Herald">
 
         <activity
             android:name=".MainActivity"

@@ -17,6 +17,13 @@ enum Secure {
 
     static func loadOrCreateCode() -> String {
         if let s = UserDefaults.standard.string(forKey: keyDefaultsKey), !s.isEmpty { return s }
+        // 从旧 bundle id（local.phonebridge）迁移配对码，改名后手机端不用重新粘
+        if let legacy = CFPreferencesCopyAppValue(keyDefaultsKey as CFString,
+                                                  "local.phonebridge" as CFString) as? String,
+           !legacy.isEmpty {
+            UserDefaults.standard.set(legacy, forKey: keyDefaultsKey)
+            return legacy
+        }
         let code = newPairCode()
         UserDefaults.standard.set(code, forKey: keyDefaultsKey)
         return code

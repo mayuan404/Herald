@@ -1,4 +1,4 @@
-# PhoneBridge
+# Herald
 
 把安卓手机的通知（短信、微信、验证码…）直接送到 Mac 菜单栏，**不经过任何服务器**。
 顺带内置 TOTP 验证器（Google Authenticator 那类），验证码在 Mac 上生成。
@@ -6,7 +6,7 @@
 ## 为什么不用 KDE Connect
 
 KDE Connect 依赖局域网 UDP 广播 + 直连，而很多 Wi-Fi 做了三层隔离（AP isolation），
-手机和 Mac 明明在同一个 SSID 也互相不可见。PhoneBridge 走 **蓝牙 BLE**，
+手机和 Mac 明明在同一个 SSID 也互相不可见。Herald 走 **蓝牙 BLE**，
 不经过 IP 网络，隔离与否都不影响。
 
 ## 架构
@@ -28,23 +28,23 @@ Mac：菜单栏 App（CoreBluetooth central）──► 通知列表 / 横幅 / 
 
 ```bash
 cd mac && ./build.sh
-# 生成并安装到 ~/Applications/PhoneBridge.app
-open ~/Applications/PhoneBridge.app
+# 生成并安装到 ~/Applications/Herald.app
+open ~/Applications/Herald.app
 ```
 
 首次启动会请求「蓝牙」权限；菜单栏出现手机图标即表示在扫描。
 
 ### 安卓端（小米 14 / HyperOS）
 
-1. 从 [Releases](https://github.com/mayuan404/PhoneBridge/releases) 下载 `PhoneBridge-0.1.0.apk`
-   （或在本仓库 Actions 页面下载 `phonebridge-apk` 产物）；
-2. 安装后打开 PhoneBridge：
-   - 点「授予通知读取权限」→ 在系统列表里勾选 PhoneBridge；
+1. 从 [Releases](https://github.com/mayuan404/Herald/releases) 下载 `Herald-0.1.0.apk`
+   （或在本仓库 Actions 页面下载 `herald-apk` 产物）；
+2. 安装后打开 Herald：
+   - 点「授予通知读取权限」→ 在系统列表里勾选 Herald；
    - 点「启动后台服务」；
 3. 省电设置（关键，否则后台会被杀）：
-   - 设置 → 应用设置 → 应用管理 → PhoneBridge → 省电策略 → **无限制**
-   - 设置 → 应用设置 → 应用管理 → PhoneBridge → 自启动 → 允许
-   - 最近任务里给 PhoneBridge 加锁。
+   - 设置 → 应用设置 → 应用管理 → Herald → 省电策略 → **无限制**
+   - 设置 → 应用设置 → 应用管理 → Herald → 自启动 → 允许
+   - 最近任务里给 Herald 加锁。
 
 ### 联调（没有蓝牙时）
 
@@ -90,7 +90,7 @@ Google Authenticator 本身不导出，需要手动录入一次；或者之前�
 不改变「同频段可嗅探」的事实，所以不把它当安全依据。
 
 1. Mac 菜单栏 → **配对码** → 「复制」；
-2. 手机 PhoneBridge → 粘贴到「配对码」输入框 → **保存配对码**；
+2. 手机 Herald → 粘贴到「配对码」输入框 → **保存配对码**；
 3. 两端用 `SHA-256(code + "|PhoneBridge|v1")` 派生 32 字节密钥，消息体用 **AES-256-GCM**（12 字节随机 nonce）加密，
    外层是 `E1:` + base64(nonce‖密文‖tag)；
 4. 配对码不一致时 Mac 顶部会显示「配对码不一致」，消息不会被渲染。
@@ -111,7 +111,7 @@ Google Authenticator 本身不导出，需要手动录入一次；或者之前�
 3. **只用 BLE，不连 IP 网络**：数据不经过路由器、服务器，也不受 Wi-Fi 隔离影响。
 4. **TCP 调试口只绑回环**：`127.0.0.1:8765`（配合 `adb reverse`），不监听局域网，
    并且同样只接受 `E1:` 密文。
-5. **不落盘、不上传**：Mac 端只在 `~/Library/Application Support/PhoneBridge/` 保存最近 100 条通知
+5. **不落盘、不上传**：Mac 端只在 `~/Library/Application Support/Herald/` 保存最近 100 条通知
    与验证器密钥（目录 0700，密钥文件不加密）。
 6. **可裁剪**：手机端可以只选要转发的 App；不选则全部转发。
 
@@ -146,5 +146,5 @@ Google Authenticator（GA）**没有导出文件**，它的「转移账号」是
 - **按 App 分组，默认全部折叠**，点组标题展开；
 - 每组**最多保留 5 条**，超出自动丢最老的（这是提示工具，不是收件箱）；
 - 每条消息右上角 `×` 可单条删除；
-- 底部「自动复制」开关：收到带验证码的消息时直接写进系统剪贴板；
+- 收到带验证码的消息时，点行内「复制」或整行即可复制（有意不做自动写剪贴板，避免覆盖你正在复制的东西）；
 - 手机端「选择要转发的 App」可只转发短信/微信，不选则全部转发。

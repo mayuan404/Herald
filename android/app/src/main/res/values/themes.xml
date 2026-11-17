@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.PhoneBridge" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.Herald" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">@color/pb_primary</item>
         <item name="colorOnPrimary">@color/pb_on_primary</item>
         <item name="colorSurface">@color/pb_surface</item>

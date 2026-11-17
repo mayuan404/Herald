@@ -1,4 +1,4 @@
-package local.phonebridge
+package dev.herald
 
 import android.Manifest
 import android.content.Intent
@@ -40,7 +40,7 @@ class MainActivity : AppCompatActivity() {
         tvEvents = findViewById(R.id.tvEvents)
         etPair = findViewById(R.id.etPair)
 
-        etPair.setText(getSharedPreferences("phonebridge", MODE_PRIVATE).getString("pairCode", "") ?: "")
+        etPair.setText(getSharedPreferences("herald", MODE_PRIVATE).getString("pairCode", "") ?: "")
 
         findViewById<MaterialButton>(R.id.btnGrant).setOnClickListener {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -58,14 +58,14 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<MaterialButton>(R.id.btnSavePair).setOnClickListener {
             val code = etPair.text.toString().trim()
-            getSharedPreferences("phonebridge", MODE_PRIVATE).edit().putString("pairCode", code).apply()
+            getSharedPreferences("herald", MODE_PRIVATE).edit().putString("pairCode", code).apply()
             Link.pairCode = code
             Link.log(if (code.isEmpty()) "已清除配对码（通知将不再发送）" else "配对码已保存")
             refresh()
         }
         findViewById<MaterialButton>(R.id.btnPick).setOnClickListener { pickPackages() }
         findViewById<MaterialButton>(R.id.btnTest).setOnClickListener {
-            Link.push("local.phonebridge.test", "测试", "PhoneBridge", "这是一条测试通知 123456")
+            Link.push("dev.herald.test", "测试", "Herald", "这是一条测试通知 123456")
             refresh()
         }
 
@@ -97,7 +97,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun pickPackages() {
         val pm = packageManager
-        val prefs = getSharedPreferences("phonebridge", MODE_PRIVATE)
+        val prefs = getSharedPreferences("herald", MODE_PRIVATE)
         val saved = prefs.getStringSet("packages", emptySet()) ?: emptySet()
 
         val map = LinkedHashMap<String, String>()

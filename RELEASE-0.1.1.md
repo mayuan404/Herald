@@ -1,4 +1,4 @@
-# PhoneBridge 0.1.1
+# Herald 0.1.1
 
 > 稳定性修复 + 安全模型收口。**必须两端一起升级**（Mac App 与 APK）。
 
