@@ -36,7 +36,7 @@ open ~/Applications/Herald.app
 
 ### 安卓端（小米 14 / HyperOS）
 
-1. 从 [Releases](https://github.com/mayuan404/Herald/releases) 下载 `Herald-0.1.0.apk`
+1. 从 [Releases](https://github.com/mayuan404/Herald/releases) 下载 `Herald-0.2.0.apk`
    （或在本仓库 Actions 页面下载 `herald-apk` 产物）；
 2. 安装后打开 Herald：
    - 点「授予通知读取权限」→ 在系统列表里勾选 Herald；
@@ -74,7 +74,7 @@ Google Authenticator 本身不导出，需要手动录入一次；或者之前�
 - 微信通知的内容取决于手机端「显示消息详情」是否打开；
 - HyperOS 对后台蓝牙广播限制较严，若长时间收不到，重启一次服务。
 
-### 0.1.1 的稳定性改动（针对「连上 30 秒就断」）
+### 0.1.1 的稳定性改动（针对「连上 30 秒就断」，0.2.0 沿用）
 
 - **回执改成写无响应**：ACK 不再占用 ATT 事务，避免「对端没回 Write Response → 30 秒后
   `CBInternalErrorDomain Code=13` 整条链路被断开」的循环（日志里出现过 1000+ 次）；
