@@ -147,6 +147,8 @@ final class Bridge: NSObject, ObservableObject {
     /// 应用层加密的配对码（Mac 生成，手机粘贴一次）
     @Published var pairCode: String = Secure.loadOrCreateCode()
     @Published var lastDecryptFailed = false
+    /// 收到过非 E1: 的明文报文并已丢弃（可能是伪造/未配对的设备）
+    @Published var lastRejectedPlaintext = false
 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -154,6 +156,14 @@ final class Bridge: NSObject, ObservableObject {
     private var rxChar: CBCharacteristic?
     private var buffer = Data()
     private var listener: NWListener?
+
+    /// 重连次数：指数退避用，连上就清零
+    private var reconnectAttempts = 0
+    /// 待回执（写无响应方式下受流控限制时排队）
+    private var pendingAcks: [String] = []
+    /// 已处理过的 msgId，用于防重放（手机端重发也会命中，属预期）
+    private var seenIds = Set<String>()
+    private var seenOrder: [String] = []
 
     // BLE UUID：手机端必须一致
     static let serviceUUID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -256,13 +266,23 @@ final class Bridge: NSObject, ObservableObject {
     func startWatchdog() {
         lastDataAt = Date()
         watchdog?.invalidate()
-        watchdog = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        watchdog = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             guard let self, self.connected else { return }
-            // 60 秒没有任何数据：链路名存实亡，断开重扫
-            if Date().timeIntervalSince(self.lastDataAt) > 60 {
-                Dbg.log("watchdog: 60s 无数据，断开重连")
+            // BLE 空转是常态（手机息屏时本来就没通知），只有长时间完全没动静才判定链路已死。
+            // 阈值放得很宽，避免「没数据就断开」把本来健康的连接反复掐掉。
+            if Date().timeIntervalSince(self.lastDataAt) > 600 {
+                Dbg.log("watchdog: 10 分钟无任何数据，断开重连")
                 self.lastDataAt = Date()
                 if let p = self.peripheral { self.central?.cancelPeripheralConnection(p) }
+            }
+        }
+    }
+
+    private func rememberId(_ id: String) {
+        if seenIds.insert(id).inserted {
+            seenOrder.append(id)
+            if seenOrder.count > 500 {
+                seenIds.remove(seenOrder.removeFirst())
             }
         }
     }
@@ -286,8 +306,19 @@ final class Bridge: NSObject, ObservableObject {
         }
         var n = note
         lastDataAt = Date()
+        let msgId = n.msgId
+        if let id = msgId {
+            // 防重放：同一 msgId 只处理一次。手机端重发（Mac 回执丢了）也会命中，
+            // 此时补一个 ACK 让它停止重发即可，不重复展示/不重复写剪贴板。
+            if seenIds.contains(id) {
+                Dbg.log("重复报文已忽略 id=\(id)")
+                sendAck(id)
+                return
+            }
+            rememberId(id)
+        }
         if n.pkg == "__hb" {
-            if let id = n.msgId { sendAck(id) }
+            if let id = msgId { sendAck(id) }
             return
         }
         if n.code == nil { n.code = extractCode(n.title + " " + n.text) }
@@ -314,15 +345,41 @@ final class Bridge: NSObject, ObservableObject {
         }
     }
 
-    /// 回执：写 RX 特征，手机端据此停止重发
+    /// 回执：写 RX 特征，手机端据此停止重发。
+    ///
+    /// 优先用「写无响应」（ATT Write Command）：不占 ATT 事务，不会出现
+    /// 「对方没回 Write Response → 30 秒后整条链路超时断开」。旧版 APK 的 RX
+    /// 只有 WRITE 属性，自动退回带响应写法，保证升级顺序无所谓。
     func sendAck(_ id: String) {
         guard let p = peripheral, let rx = rxChar else {
             Dbg.log("ack skipped (no rx char) id=\(id)")
             return
         }
+        let supportsNoRsp = rx.properties.contains(.writeWithoutResponse)
+        if supportsNoRsp, !p.canSendWriteWithoutResponse {
+            // 控制器缓冲满了：排队，等 peripheralIsReady 再发
+            pendingAcks.append(id)
+            if pendingAcks.count > 50 { pendingAcks.removeFirst() }
+            Dbg.log("ack deferred (流控) id=\(id)")
+            return
+        }
+        writeAck(id, to: p, characteristic: rx, withoutResponse: supportsNoRsp)
+    }
+
+    private func writeAck(_ id: String, to p: CBPeripheral, characteristic rx: CBCharacteristic,
+                          withoutResponse: Bool) {
         let data = Data(("ACK \(id)\n").utf8)
-        p.writeValue(data, for: rx, type: .withResponse)
-        Dbg.log("ack sent \(id)")
+        p.writeValue(data, for: rx, type: withoutResponse ? .withoutResponse : .withResponse)
+        Dbg.log("ack sent\(withoutResponse ? " (no-rsp)" : " (rsp)") \(id)")
+    }
+
+    private func flushPendingAcks() {
+        guard let p = peripheral, let rx = rxChar,
+              rx.properties.contains(.writeWithoutResponse), p.canSendWriteWithoutResponse else { return }
+        while let id = pendingAcks.first, p.canSendWriteWithoutResponse {
+            pendingAcks.removeFirst()
+            writeAck(id, to: p, characteristic: rx, withoutResponse: true)
+        }
     }
 
     private func postBanner(_ n: IncomingNote) {
@@ -375,7 +432,11 @@ final class Bridge: NSObject, ObservableObject {
     private func startTCP() {
         guard let port = NWEndpoint.Port(rawValue: 8765) else { return }
         do {
-            let l = try NWListener(using: .tcp, on: port)
+            // 只绑回环：这个口只给 `adb reverse` 联调用。绑 0.0.0.0 的话，
+            // 同一局域网里任何人都能往这里灌通知。
+            let params = NWParameters.tcp
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+            let l = try NWListener(using: params)
             l.newConnectionHandler = { [weak self] conn in
                 conn.start(queue: .main)
                 self?.receive(on: conn)
@@ -410,6 +471,7 @@ final class Bridge: NSObject, ObservableObject {
             if line.hasPrefix("E1:") {
                 if let plain = Secure.decrypt(line, code: pairCode) {
                     lastDecryptFailed = false
+                    lastRejectedPlaintext = false
                     ingest(plain)
                 } else {
                     // 可能是配对码不一致，或者有人伪造了报文
@@ -418,9 +480,12 @@ final class Bridge: NSObject, ObservableObject {
                     onChange?()
                 }
             } else {
-                // 明文（老版本手机端 / 联调）：照收，但在日志里标记
-                Dbg.log("plaintext note accepted (unencrypted)")
-                ingest(Data(line.utf8))
+                // 安全：一律丢弃明文。只要 Mac 侧有配对码（首次启动就会生成），
+                // 合法手机端只会发 E1: 密文；收到明文说明是未配对设备/伪造报文，
+                // 接受它等于给攻击者留了一条「降级注入」通道。
+                lastRejectedPlaintext = true
+                Dbg.log("已丢弃明文报文（未加密/伪造）：\(line.prefix(80))")
+                onChange?()
             }
         }
     }
@@ -439,7 +504,9 @@ final class Bridge: NSObject, ObservableObject {
 
     func send(_ text: String) {
         guard let p = peripheral, let tx = txChar, let d = text.data(using: .utf8) else { return }
-        p.writeValue(d, for: tx, type: .withResponse)
+        // 手机端 TX 特征是 notify-only，默认并不支持带响应写；按属性选写法
+        let type: CBCharacteristicWriteType = tx.properties.contains(.write) ? .withResponse : .withoutResponse
+        p.writeValue(d, for: tx, type: type)
     }
 }
 
@@ -470,11 +537,12 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         Dbg.log("connected \(peripheral.name ?? "?")")
         connected = true
+        reconnectAttempts = 0
         linkName = "已连接（BLE）"
         peripheral.discoverServices([Bridge.serviceUUID])
         onChange?()
-        // 4 秒内没拿到可订阅的特征，说明这条连接没用了，断开重扫
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+        // 6 秒内没拿到可订阅的特征，说明这条连接没用了，断开重扫
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self, self.connected, self.txChar == nil else { return }
             Dbg.log("connected but not subscribed → force rescan")
             self.connected = false
@@ -487,19 +555,42 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Dbg.log("disconnected \(error.map { String(describing: $0) } ?? "-")")
         connected = false
-        linkName = "已断开，重连中…"
+        linkName = "已断开，等待重连…"
         txChar = nil
         rxChar = nil
+        pendingAcks.removeAll()
         onChange?()
-        let p = peripheral
-        central.connect(p, options: nil)
-        // 3 秒还没连上就退回扫描：手机端可能重启了广播
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, !self.connected else { return }
-            Dbg.log("reconnect timed out → rescan")
-            self.peripheral = nil
-            central.cancelPeripheralConnection(p)
-            central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+        scheduleReconnect(reason: "disconnect")
+    }
+
+    /// 指数退避重连：1、2、4、8、16、30 秒。
+    /// 之前「断了立刻连、3 秒连不上就 cancel+rescan」会和手机端的广播重启、
+    /// 配对流程互相打架，表现成一直抖动的「断开/重连」。
+    private func scheduleReconnect(reason: String) {
+        reconnectAttempts += 1
+        let n = reconnectAttempts
+        let delay = min(30.0, pow(2.0, Double(n - 1)))
+        Dbg.log("重连 #\(n)（\(reason)）：\(Int(delay))s 后")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.connected, let central = self.central,
+                  central.state == .poweredOn else { return }
+            if n >= 5 {
+                // 连续失败：手机端可能重启了广播/换了地址，回到扫描
+                if let p = self.peripheral { central.cancelPeripheralConnection(p) }
+                self.peripheral = nil
+                self.linkName = "重新扫描中…"
+                self.onChange?()
+                Dbg.log("重连多次失败 → 重新扫描")
+                central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+                return
+            }
+            if let p = self.peripheral {
+                self.linkName = "重连中（第 \(n) 次）…"
+                self.onChange?()
+                central.connect(p, options: nil)
+            } else {
+                central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+            }
         }
     }
 
@@ -510,15 +601,25 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
         connected = false
         txChar = nil
         rxChar = nil
-        linkName = "连接失败，重新扫描…"
+        linkName = "连接失败，稍后重试…"
         onChange?()
         central.cancelPeripheralConnection(peripheral)
-        self.peripheral = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            guard central.state == .poweredOn else { return }
-            Dbg.log("rescan after connect failure")
-            central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+        scheduleReconnect(reason: "connect failed")
+    }
+
+    /// 写响应回来时才能知道 ACK 到底有没有送达（以前完全看不到）
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error {
+            Dbg.log("write \(characteristic.uuid.uuidString) 失败: \(error)")
+        } else {
+            Dbg.log("write \(characteristic.uuid.uuidString) 完成")
         }
+        flushPendingAcks()
+    }
+
+    /// 无响应写的流控窗口腾出来了
+    func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        flushPendingAcks()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {

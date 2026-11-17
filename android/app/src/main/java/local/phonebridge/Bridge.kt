@@ -107,7 +107,7 @@ object Link {
 
     private var hbStarted = false
 
-    /** 心跳：长时间没有真实通知时，也要能发现链路已死 */
+    /** 心跳：只为在长时间没通知时确认链路还活着，间隔不必太密 */
     fun startHeartbeat() {
         if (hbStarted) return
         hbStarted = true
@@ -115,9 +115,9 @@ object Link {
             override fun run() {
                 // 积压时不要用心跳继续污染队列
                 if (connected && queue.size < 20) push("__hb", "heartbeat", "", "")
-                handler.postDelayed(this, 20_000)
+                handler.postDelayed(this, 60_000)
             }
-        }, 20_000)
+        }, 60_000)
     }
 
     /** 把一条通知编码成 JSON 行发出去 */
@@ -132,16 +132,18 @@ object Link {
             .put("time", System.currentTimeMillis() / 1000.0)
             .toString()
         log("收到通知 pkg=$pkg title=${title.take(20)}")
-        val line = if (pairCode.isEmpty()) {
-            json + "\n"
-        } else {
-            val enc = Secure.encrypt(json.toByteArray(Charsets.UTF_8), pairCode)
-            if (enc == null) {
-                log("加密失败，本条丢弃")
-                return
-            }
-            enc + "\n"
+        // 安全：没有配对码就不发。明文一旦发出去，同频段任何人都能读，
+        // 而且 Mac 端现在也会直接丢弃明文——留着这条通道只会让人误以为能用。
+        if (pairCode.isEmpty()) {
+            log("未设置配对码，本条不发送（明文已禁用）")
+            return
         }
+        val enc = Secure.encrypt(json.toByteArray(Charsets.UTF_8), pairCode)
+        if (enc == null) {
+            log("加密失败，本条丢弃")
+            return
+        }
+        val line = enc + "\n"
         pending[id] = Pending(line, 0)
         while (queue.size >= MAX_QUEUE) {
             val dropped = queue.poll()
@@ -159,6 +161,16 @@ object Link {
     /** 最近一次「发送」与「通知已发出确认」的时间，用来发现死连接 */
     @Volatile private var lastSendAt = 0L
     @Volatile private var lastAckAt = 0L
+    @Volatile private var lastSentOkAt = 0L
+    @Volatile private var lastRecoverAt = 0L
+
+    // ---- 分片发送（带流控）----
+    // Android 的 GATT server 同一时刻只允许有限个未确认的 notification 在途。
+    // 之前「20 字节一片 + 每片 sleep 8ms 连发」在拥塞时会丢片/返回错误，
+    // 长通知于是残缺、Mac 解不出来、也就没有 ACK，最后触发重发和断链。
+    // 现在改成：排队分片，每片等 onNotificationSent 回调后再发下一片。
+    private val chunks = java.util.ArrayDeque<ByteArray>()
+    @Volatile private var chunkInFlight = false
 
     private data class Pending(var line: String, var tries: Int)
     private val pending = java.util.concurrent.ConcurrentHashMap<String, Pending>()
@@ -177,29 +189,31 @@ object Link {
         handler.postDelayed({
             val p = pending[id] ?: return@postDelayed
             if (acked.contains(id)) return@postDelayed
-            if (p.tries >= 3) {
+            if (p.tries >= 4) {
                 pending.remove(id)
-                log("重发 3 次仍无回执，放弃 #$id，重建连接")
-                dropStaleLink()
+                // 以前这里会 cancelConnection「重建连接」，但链路往往是好的，
+                // 只是回执慢了：主动断反而制造抖动。交给两端各自的看门狗。
+                log("重发 4 次仍无回执，放弃 #$id")
                 return@postDelayed
             }
             p.tries += 1
             log("未收到回执，第 ${p.tries} 次重发 #$id")
             queue.add(p.line)
             flush()
-        }, 4000)
+        }, 10_000)
     }
 
     fun markAck() {
         lastAckAt = System.currentTimeMillis()
     }
 
-    /** BLE notify 不需要对方确认：如果发了很久一次 onNotificationSent 都没回来，说明链路已死 */
+    /** 真正发出去过的分片才算「链路活着」：有积压且很久一片都发不出去，才怀疑链路死了 */
     private fun linkLooksDead(): Boolean {
         if (!connected) return false
-        if (lastAckAt == 0L) return false
+        if (queue.isEmpty()) return false
+        if (lastSendAt == 0L) return false
         val now = System.currentTimeMillis()
-        return lastSendAt > lastAckAt && now - lastSendAt > 15_000
+        return lastSendAt > lastSentOkAt && now - lastSendAt > 60_000
     }
 
     private fun dropStaleLink() {
@@ -216,24 +230,38 @@ object Link {
     }
 
     fun flush() {
+        var retryLater = false
+        var nextSoon = false
         synchronized(sendLock) {
-            if (linkLooksDead()) {
+            val now = System.currentTimeMillis()
+            if (linkLooksDead() && now - lastRecoverAt > 300_000) {
+                lastRecoverAt = now
                 dropStaleLink()
-                scheduleFlush()
-                return
-            }
-            while (queue.isNotEmpty()) {
-                val line = queue.peek() ?: break
-                val viaBle = sendBle(line)
-                val viaTcp = !viaBle && sendTcp(line)
-                if (!viaBle && !viaTcp) {
-                    log("发送失败：${bleStateText()}；${tcpStateText()}；队列 ${queue.size} 条，稍后重试")
-                    scheduleFlush()
-                    break
+                retryLater = true
+            } else if (queue.isNotEmpty()) {
+                val chunksPending = synchronized(chunks) { chunks.isNotEmpty() }
+                if (chunkInFlight || chunksPending) {
+                    nextSoon = true
+                } else {
+                    val line = queue.peek()
+                    if (line != null) {
+                        val viaBle = sendBle(line)
+                        val viaTcp = !viaBle && sendTcp(line)
+                        if (!viaBle && !viaTcp) {
+                            log("发送失败：${bleStateText()}；${tcpStateText()}；队列 ${queue.size} 条，稍后重试")
+                            retryLater = true
+                        } else {
+                            queue.poll()
+                            log(if (viaBle) "已通过蓝牙发送（队列剩 ${queue.size}）" else "已通过 TCP 发送（队列剩 ${queue.size}）")
+                            nextSoon = queue.isNotEmpty()
+                        }
+                    }
                 }
-                queue.poll()
-                log(if (viaBle) "已通过蓝牙发送（队列剩 ${queue.size}）" else "已通过 TCP 发送（队列剩 ${queue.size}）")
             }
+        }
+        when {
+            retryLater -> scheduleFlush(3_000)
+            nextSoon -> handler.postDelayed({ flush() }, 150)
         }
     }
 
@@ -261,35 +289,78 @@ object Link {
         }, delayMs)
     }
 
+    /** 把一条消息切成 20 字节分片排队，返回 false 表示链路不可用 */
     private fun sendBle(line: String): Boolean {
-        val srv = server ?: return false
-        val ch = txChar ?: return false
-        val dev = central ?: return false
-        if (!connected) return false
-        lastSendAt = System.currentTimeMillis()
+        if (server == null || txChar == null || central == null || !connected) return false
         val bytes = line.toByteArray(Charsets.UTF_8)
-        // 20 字节一片：不依赖 MTU 协商结果，最保守也最稳
-        var offset = 0
-        while (offset < bytes.size) {
-            val end = minOf(offset + 20, bytes.size)
-            val chunk = bytes.copyOfRange(offset, end)
+        synchronized(chunks) {
+            chunks.clear()   // 新消息优先；没发完的旧分片由 pending 重发兜底
+            var offset = 0
+            while (offset < bytes.size) {
+                val end = minOf(offset + 20, bytes.size)
+                chunks.addLast(bytes.copyOfRange(offset, end))
+                offset = end
+            }
+        }
+        lastSendAt = System.currentTimeMillis()
+        pumpChunks()
+        return true
+    }
+
+    /** 发下一片；必须等 onNotificationSent 回来再发下一片，否则会丢片 */
+    private fun pumpChunks() {
+        val srv = server ?: return
+        val ch = txChar ?: return
+        val dev = central ?: return
+        if (!connected) return
+        // 「检查 + 置位 + 取片」必须原子，否则 flush 线程和回调线程会各发一片
+        val chunk = synchronized(chunks) {
+            if (chunkInFlight || chunks.isEmpty()) null
+            else { chunkInFlight = true; chunks.removeFirst() }
+        } ?: return
+        val ok = try {
             ch.value = chunk
-            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 srv.notifyCharacteristicChanged(dev, ch, false, chunk) == BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 srv.notifyCharacteristicChanged(dev, ch, false)
                 true
             }
-            if (!ok) {
-                log("蓝牙分片发送失败，停止本条")
-                return false
-            }
-            offset = end
-            // 给控制器一点时间，避免拥塞丢包
-            try { Thread.sleep(8) } catch (e: InterruptedException) { }
+        } catch (e: Exception) {
+            log("分片发送异常：${e.message}")
+            false
         }
-        return true
+        if (!ok) {
+            synchronized(chunks) { chunkInFlight = false; chunks.clear() }
+            log("分片被拒（拥塞或链路失效），本条等重发")
+        }
+    }
+
+    /** 连接状态变化时清空发送状态，避免「上一轮 in-flight」把新连接卡死 */
+    fun resetSendState() {
+        synchronized(chunks) {
+            chunks.clear()
+            chunkInFlight = false
+        }
+    }
+
+    /** GATT 每片发完（或失败）后由回调驱动下一片，形成真正的流控 */
+    fun onChunkSent(status: Int) {
+        synchronized(chunks) {
+            chunkInFlight = false
+            if (status != BluetoothGatt.GATT_SUCCESS) chunks.clear()
+        }
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            log("通知发送失败 status=$status")
+        } else {
+            lastSentOkAt = System.currentTimeMillis()
+        }
+        pumpChunks()
+        val done = synchronized(chunks) { chunks.isEmpty() }
+        if (done) {
+            handler.postDelayed({ if (queue.isNotEmpty()) flush() }, 40)
+        }
     }
 
     private var tcp: Socket? = null
@@ -359,6 +430,7 @@ class BridgeService : Service() {
                 val isBonded = device?.bondState == BluetoothDevice.BOND_BONDED
                 Link.connected = newState == BluetoothGatt.STATE_CONNECTED && device != null
                 Link.central = if (newState == BluetoothGatt.STATE_CONNECTED) device else null
+                Link.resetSendState()
                 if (newState == BluetoothGatt.STATE_CONNECTED && Link.txChar == null) {
                     // 兜底：特征值属于服务，理论上不该为空；万一被清掉，连上时补回来
                     Link.txChar = holder[0]?.getService(Link.serviceUUID)?.getCharacteristic(Link.txUUID)
@@ -372,13 +444,10 @@ class BridgeService : Service() {
                     handler.postDelayed({ startAdvertise("断开后恢复广播") }, 800)
                 }
                 if (newState == BluetoothGatt.STATE_CONNECTED && device != null && !isBonded) {
-                    // 安全：连上但没配对，主动发起绑定；配对完成前不接收任何数据
-                    Link.log("发起蓝牙配对（需要两端确认）…")
-                    try {
-                        device.createBond()
-                    } catch (e: Exception) {
-                        Link.log("发起配对失败：${e.message}")
-                    }
+                    // 不再在连接瞬间自动 createBond()：MIUI/HyperOS 上这条流程很容易失败或
+                    // 留下「已配对但链路状态不一致」，而真正的安全边界是应用层 AES-GCM 配对码，
+                    // 链路层配对只是可选的额外一层。需要时用户可在系统设置里手动配对。
+                    Link.log("已连接（未配对；安全由应用层配对码保证）")
                 }
                 Link.flush()
             }
@@ -421,8 +490,8 @@ class BridgeService : Service() {
             }
 
             override fun onNotificationSent(device: BluetoothDevice?, status: Int) {
-                Link.markAck()
-                Link.flush()
+                // 用 status 判断这一片到底发出去没有；同时驱动下一片（流控）
+                Link.onChunkSent(status)
             }
         }) ?: return
 
@@ -444,7 +513,10 @@ class BridgeService : Service() {
         service.addCharacteristic(tx)
         val rx = BluetoothGattCharacteristic(
             Link.rxUUID,
-            BluetoothGattCharacteristic.PROPERTY_WRITE,
+            // 同时声明「带响应写」和「无响应写」：新版 Mac 端用无响应写回执（不占 ATT 事务），
+            // 旧版 Mac 端仍可用带响应写，升级顺序无所谓。
+            BluetoothGattCharacteristic.PROPERTY_WRITE or
+                BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
         service.addCharacteristic(rx)

@@ -58,7 +58,7 @@ class MainActivity : AppCompatActivity() {
             val code = etPair.text.toString().trim()
             getSharedPreferences("phonebridge", MODE_PRIVATE).edit().putString("pairCode", code).apply()
             Link.pairCode = code
-            Link.log(if (code.isEmpty()) "已清除配对码（将明文发送）" else "配对码已保存")
+            Link.log(if (code.isEmpty()) "已清除配对码（通知将不再发送）" else "配对码已保存")
             refresh()
         }
         findViewById<MaterialButton>(R.id.btnPick).setOnClickListener { pickPackages() }
@@ -212,7 +212,7 @@ class MainActivity : AppCompatActivity() {
         row(tvNotify, "通知读取", enabled, if (enabled) "已授权" else "未授权")
         row(tvBle, "蓝牙连接", Link.connected, if (Link.connected) "Mac 已连接" else "等待连接")
         val enc = Link.pairCode.isNotEmpty()
-        row(tvEnc, "加密", enc, if (enc) "AES-GCM 已启用" else "未设置配对码（明文）")
+        row(tvEnc, "加密", enc, if (enc) "AES-GCM 已启用" else "未设置配对码（不发送）")
 
         val ev = Link.recentEvents().takeLast(7)
         tvEvents.text = if (ev.isEmpty()) "暂无" else ev.joinToString("\n")

@@ -113,6 +113,12 @@ struct Panel: View {
                     .font(.system(size: 9.5))
                     .foregroundStyle(.orange)
             }
+            if bridge.lastRejectedPlaintext {
+                Text("已拦截明文报文")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.orange)
+                    .help("收到未加密的通知并已丢弃：可能来自未配对的设备或伪造报文")
+            }
             Spacer()
             Picker("", selection: $tab) {
                 Text("通知").tag(0)
