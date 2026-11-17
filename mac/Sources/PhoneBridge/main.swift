@@ -313,6 +313,16 @@ struct TotpRow: View {
     var onDelete: () -> Void = {}
     @State private var copied = false
 
+    /// 点卡片任意位置都复制当前验证码；给个「已复制」反馈，不然会以为没生效
+    private func copyCode() {
+        guard let code = TOTP.code(secret: account.secret, digits: account.digits,
+                                   period: account.period, at: Date()) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(code, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+    }
+
     var body: some View {
         let code = TOTP.code(secret: account.secret, digits: account.digits,
                              period: account.period, at: tick) ?? "------"
@@ -329,6 +339,12 @@ struct TotpRow: View {
             Text(code)
                 .font(.system(size: 20, weight: .bold, design: .monospaced))
                 .foregroundStyle(remain <= 5 ? Color.orange : Color.primary)
+            if copied {
+                Text("已复制")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.green)
+                    .transition(.opacity)
+            }
             ZStack {
                 Circle().stroke(Color.secondary.opacity(0.2), lineWidth: 3)
                 Circle()
@@ -350,15 +366,9 @@ struct TotpRow: View {
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         .contentShape(Rectangle())
-        .onTapGesture {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(code, forType: .string)
-        }
+        .onTapGesture { copyCode() }
         .contextMenu {
-            Button("复制验证码") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(code, forType: .string)
-            }
+            Button("复制验证码") { copyCode() }
             Button("删除这个账户", role: .destructive) { onDelete() }
         }
     }

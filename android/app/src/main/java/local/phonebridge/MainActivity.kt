@@ -53,6 +53,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.btnStop).setOnClickListener {
             stopService(Intent(this, BridgeService::class.java))
             refresh()
+            // onDestroy 是异步的，稍后再刷一次，让「服务未启动」真正显示出来
+            tvBle.postDelayed({ refresh() }, 400)
         }
         findViewById<MaterialButton>(R.id.btnSavePair).setOnClickListener {
             val code = etPair.text.toString().trim()
@@ -210,7 +212,14 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { false }
 
         row(tvNotify, "通知读取", enabled, if (enabled) "已授权" else "未授权")
-        row(tvBle, "蓝牙连接", Link.connected, if (Link.connected) "Mac 已连接" else "等待连接")
+        row(
+            tvBle, "蓝牙连接", Link.running && Link.connected,
+            when {
+                !Link.running -> "服务未启动"
+                Link.connected -> "Mac 已连接"
+                else -> "等待连接"
+            }
+        )
         val enc = Link.pairCode.isNotEmpty()
         row(tvEnc, "加密", enc, if (enc) "AES-GCM 已启用" else "未设置配对码（不发送）")
 

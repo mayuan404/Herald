@@ -85,6 +85,8 @@ object Link {
     @Volatile var txChar: BluetoothGattCharacteristic? = null
     @Volatile var central: BluetoothDevice? = null
     @Volatile var connected = false
+    /** 前台服务是否在跑。停止按钮点了之后 UI 要能反映出来，别继续显示「已连接」 */
+    @Volatile var running = false
 
     private val queue = ConcurrentLinkedQueue<String>()
 
@@ -114,7 +116,7 @@ object Link {
         handler.postDelayed(object : Runnable {
             override fun run() {
                 // 积压时不要用心跳继续污染队列
-                if (connected && queue.size < 20) push("__hb", "heartbeat", "", "")
+                if (running && connected && queue.size < 20) push("__hb", "heartbeat", "", "")
                 handler.postDelayed(this, 60_000)
             }
         }, 60_000)
@@ -132,6 +134,11 @@ object Link {
             .put("time", System.currentTimeMillis() / 1000.0)
             .toString()
         log("收到通知 pkg=$pkg title=${title.take(20)}")
+        if (!running) {
+            // 服务已停止（或还没启动）：不排队，避免停止后通知还在后台累积
+            log("服务未运行，本条忽略")
+            return
+        }
         // 安全：没有配对码就不发。明文一旦发出去，同频段任何人都能读，
         // 而且 Mac 端现在也会直接丢弃明文——留着这条通道只会让人误以为能用。
         if (pairCode.isEmpty()) {
@@ -393,6 +400,7 @@ class BridgeService : Service() {
         super.onCreate()
         Link.pairCode = getSharedPreferences("phonebridge", MODE_PRIVATE)
             .getString("pairCode", "") ?: ""
+        Link.running = true
         startForegroundWithChannel()
         Link.startHeartbeat()
         startBle()
@@ -581,6 +589,12 @@ class BridgeService : Service() {
         try { if (advRunning) advertiser?.stopAdvertising(advCallback) } catch (e: Exception) { }
         Link.server?.close()
         Link.server = null
+        Link.txChar = null
+        Link.central = null
+        Link.connected = false
+        Link.resetSendState()
+        Link.running = false
+        Link.log("服务已停止（不再广播、不再转发）")
         super.onDestroy()
     }
 }
