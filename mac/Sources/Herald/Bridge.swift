@@ -169,6 +169,12 @@ final class Bridge: NSObject, ObservableObject {
     private var seenIds = Set<String>()
     private var seenOrder: [String] = []
 
+    /// 监督器：兜住「睡醒后 CoreBluetooth 不再扫描 / 重连失败后没人再拉」这类卡死
+    private var supervisor: Timer?
+    private var isScanning = false
+    private var lastScanAt = Date.distantPast
+    private var lastStateLogged: CBManagerState?
+
     // BLE UUID：手机端必须一致
     static let serviceUUID = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
     static let txUUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -185,6 +191,69 @@ final class Bridge: NSObject, ObservableObject {
     func start() {
         startTCP()
         central = CBCentralManager(delegate: self, queue: .main)
+        startSupervisor()
+        // 合上盖子再打开：CoreBluetooth 的旧连接往往已经名存实亡，
+        // 而系统不会补发 disconnect，不主动重扫就永远停在「已断开」。
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Dbg.log("系统唤醒 → 丢弃旧连接，重新扫描")
+            if let p = self.peripheral { self.central?.cancelPeripheralConnection(p) }
+            self.peripheral = nil
+            self.connected = false
+            self.txChar = nil
+            self.rxChar = nil
+            self.reconnectAttempts = 0
+            self.isScanning = false
+            self.linkName = "已唤醒，重新扫描…"
+            self.onChange?()
+            self.startScan("wake")
+        }
+    }
+
+    // MARK: 连接监督
+
+    private func startScan(_ reason: String) {
+        guard let central, central.state == .poweredOn else { return }
+        isScanning = true
+        lastScanAt = Date()
+        Dbg.log("开始扫描（\(reason)）")
+        central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+    }
+
+    /// 每 20 秒对一次状态：没连接又没在扫描、或者扫描超过 60 秒毫无结果，都重新拉起。
+    private func startSupervisor() {
+        supervisor?.invalidate()
+        supervisor = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            guard let self, let central = self.central else { return }
+            Dbg.log("supervisor state=\(central.state.rawValue) connected=\(self.connected) scanning=\(self.isScanning) peripheral=\(self.peripheral?.name ?? "-")")
+            guard central.state == .poweredOn else {
+                if self.lastStateLogged != central.state {
+                    self.lastStateLogged = central.state
+                    switch central.state {
+                    case .unauthorized:
+                        self.linkName = "蓝牙权限被拒绝（系统设置 → 隐私与安全 → 蓝牙）"
+                    case .poweredOff:
+                        self.linkName = "蓝牙已关闭"
+                    case .unknown:
+                        self.linkName = "等待蓝牙授权…（系统设置 → 隐私与安全 → 蓝牙）"
+                    default:
+                        self.linkName = "蓝牙不可用"
+                    }
+                    Dbg.log("central state=\(central.state.rawValue)（非 poweredOn）")
+                    self.onChange?()
+                }
+                return
+            }
+            self.lastStateLogged = central.state
+            if self.connected { return }
+            if self.peripheral != nil { return }   // 正在退避重连，交给 scheduleReconnect
+            if !self.isScanning || Date().timeIntervalSince(self.lastScanAt) > 60 {
+                if self.isScanning { central.stopScan(); self.isScanning = false }
+                self.startScan("supervisor")
+            }
+        }
     }
 
     // MARK: 数据
@@ -510,12 +579,19 @@ final class Bridge: NSObject, ObservableObject {
 extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         guard central.state == .poweredOn else {
-            linkName = "蓝牙不可用"
+            lastStateLogged = central.state
+            switch central.state {
+            case .unauthorized: linkName = "蓝牙权限被拒绝（系统设置 → 隐私与安全 → 蓝牙）"
+            case .poweredOff: linkName = "蓝牙已关闭"
+            case .unknown: linkName = "等待蓝牙授权…（系统设置 → 隐私与安全 → 蓝牙）"
+            default: linkName = "蓝牙不可用"
+            }
+            Dbg.log("central state=\(central.state.rawValue)（非 poweredOn）")
             onChange?()
             return
         }
-        Dbg.log("central poweredOn, start scan")
-        central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+        Dbg.log("central poweredOn")
+        startScan("poweredOn")
     }
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
@@ -524,6 +600,7 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
         self.peripheral = peripheral
         peripheral.delegate = self
         central.stopScan()
+        isScanning = false
         central.connect(peripheral, options: nil)
         linkName = "连接中…"
         onChange?()
@@ -567,8 +644,15 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
         let delay = min(30.0, pow(2.0, Double(n - 1)))
         Dbg.log("重连 #\(n)（\(reason)）：\(Int(delay))s 后")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.connected, let central = self.central,
-                  central.state == .poweredOn else { return }
+            guard let self, !self.connected, let central = self.central else { return }
+            guard central.state == .poweredOn else {
+                // 蓝牙中途被关掉/权限被撤：别吞掉，等状态回来再继续
+                Dbg.log("重连暂缓：central state=\(central.state.rawValue)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.scheduleReconnect(reason: "state not poweredOn")
+                }
+                return
+            }
             if n >= 5 {
                 // 连续失败：手机端可能重启了广播/换了地址，回到扫描
                 if let p = self.peripheral { central.cancelPeripheralConnection(p) }
@@ -576,7 +660,8 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
                 self.linkName = "重新扫描中…"
                 self.onChange?()
                 Dbg.log("重连多次失败 → 重新扫描")
-                central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+                self.reconnectAttempts = 0
+                self.startScan("重连失败")
                 return
             }
             if let p = self.peripheral {
@@ -584,7 +669,7 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
                 self.onChange?()
                 central.connect(p, options: nil)
             } else {
-                central.scanForPeripherals(withServices: [Bridge.serviceUUID], options: nil)
+                self.startScan("无设备可连")
             }
         }
     }

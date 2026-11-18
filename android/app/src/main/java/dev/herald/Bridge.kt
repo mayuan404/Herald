@@ -178,6 +178,7 @@ object Link {
     // 现在改成：排队分片，每片等 onNotificationSent 回调后再发下一片。
     private val chunks = java.util.ArrayDeque<ByteArray>()
     @Volatile private var chunkInFlight = false
+    @Volatile private var chunkToken = 0
 
     private data class Pending(var line: String, var tries: Int)
     private val pending = java.util.concurrent.ConcurrentHashMap<String, Pending>()
@@ -243,9 +244,12 @@ object Link {
             val now = System.currentTimeMillis()
             if (linkLooksDead() && now - lastRecoverAt > 300_000) {
                 lastRecoverAt = now
-                dropStaleLink()
-                retryLater = true
-            } else if (queue.isNotEmpty()) {
+                // 以前这里会 cancelConnection「重建连接」，结果链路上只要有一阵没回执，
+                // 手机就主动把好好的连接掐掉——用户看到的就是「频繁掉线」。
+                // 现在只记录并让重发/心跳继续，断开由系统或 Mac 端决定。
+                log("链路疑似无响应，继续重试（不主动断开）")
+            }
+            if (queue.isNotEmpty()) {
                 val chunksPending = synchronized(chunks) { chunks.isNotEmpty() }
                 if (chunkInFlight || chunksPending) {
                     nextSoon = true
@@ -325,6 +329,18 @@ object Link {
             if (chunkInFlight || chunks.isEmpty()) null
             else { chunkInFlight = true; chunks.removeFirst() }
         } ?: return
+        // 某些机型/息屏下 onNotificationSent 可能不回调：5 秒后强制解锁，
+        // 否则 chunkInFlight 会一直为 true，后续消息全部卡住、看起来像断连。
+        val token = ++chunkToken
+        handler.postDelayed({
+            val stuck = synchronized(chunks) {
+                if (chunkInFlight && chunkToken == token) { chunkInFlight = false; true } else false
+            }
+            if (stuck) {
+                log("分片 5 秒未回调，重置发送状态并重试")
+                scheduleFlush(1_500)
+            }
+        }, 5_000)
         val ok = try {
             ch.value = chunk
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -404,6 +420,14 @@ class BridgeService : Service() {
         startForegroundWithChannel()
         Link.startHeartbeat()
         startBle()
+        // 广播看门狗：HyperOS 会在息屏/后台把广播悄悄停掉，而系统不回调 onStartFailure。
+        // 没连上又没在广播时每 30 秒重新拉一次，否则 Mac 永远扫不到这台手机。
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                if (Link.running && !Link.connected && !advRunning) startAdvertise("看门狗恢复广播")
+                handler.postDelayed(this, 30_000)
+            }
+        }, 30_000)
     }
 
     private fun startForegroundWithChannel() {

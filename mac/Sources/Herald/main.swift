@@ -200,6 +200,12 @@ struct Panel: View {
             Button("添加验证器…") { addTotp() }
             Button("导入验证器…") { importTotp() }
             Button("清空通知") { bridge.notes.removeAll() }
+            Button("蓝牙设置") {
+                if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth") {
+                    NSWorkspace.shared.open(u)
+                }
+            }
+            .help("蓝牙连不上时：确认 Herald 已在「隐私与安全 → 蓝牙」里被允许")
             Spacer()
             Button("退出") { NSApp.terminate(nil) }
         }
