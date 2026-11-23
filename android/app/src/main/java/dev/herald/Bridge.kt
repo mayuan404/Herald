@@ -664,6 +664,34 @@ class BridgeService : Service() {
 }
 
 class NotifListener : NotificationListenerService() {
+    /**
+     * 白名单只能回答「哪个 App」，但同一个 App 会发好几类东西：
+     * 真正的消息、后台运行提示、下载进度、组摘要、设备查找……
+     * 后几类全是噪声（「」正在运行 / 点按即可了解详情），必须在类型层面挡掉。
+     */
+    private fun isNoise(sbn: StatusBarNotification, n: Notification, text: String): Boolean {
+        // 常驻通知：前台服务、正在运行、充电状态之类
+        if (sbn.isOngoing) return true
+        // 组摘要：真正的消息会以子通知单独再来一次，转发摘要等于每条都翻倍
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return true
+        // 分类上属于服务/进度/导航/系统状态的，一律不是「别人发来的消息」
+        when (n.category) {
+            Notification.CATEGORY_SERVICE,
+            Notification.CATEGORY_PROGRESS,
+            Notification.CATEGORY_SYSTEM,
+            Notification.CATEGORY_NAVIGATION,
+            Notification.CATEGORY_TRANSPORT -> return true
+        }
+        // 渠道兜底：HyperOS/部分 ROM 的「正在运行」走这类渠道
+        val ch = n.channelId?.lowercase().orEmpty()
+        if (ch.contains("foreground") || ch.contains("running") ||
+            ch.contains("service") || ch.contains("system")) return true
+        // 文案兜底：这些字样基本只出现在系统状态提示里
+        val junk = listOf("正在运行", "点按即可了解详情", "后台运行中", "正在后台")
+        if (junk.any { text.contains(it) }) return true
+        return false
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return
         val n = sbn.notification
@@ -672,6 +700,8 @@ class NotifListener : NotificationListenerService() {
         val text = (extras.getCharSequence(Notification.EXTRA_TEXT)
             ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT))?.toString().orEmpty()
         if (title.isEmpty() && text.isEmpty()) return
+
+        if (isNoise(sbn, n, text)) return
 
         // 只转发用户勾选的包，默认放行短信/微信/验证器类
         val prefs = getSharedPreferences("herald", MODE_PRIVATE)
