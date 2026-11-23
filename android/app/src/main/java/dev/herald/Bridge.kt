@@ -528,6 +528,7 @@ class BridgeService : Service() {
                 // 这是「连上几秒就断 + 发出去没回执」的来源。
                 Link.log("GATT 服务注册完成 status=$status uuid=${service?.uuid}")
                 if (status == BluetoothGatt.GATT_SUCCESS) {
+                    serviceReady = true
                     startAdvertise("服务就绪")
                 } else {
                     handler.postDelayed({ startAdvertise("服务注册失败重试") }, 1_500)
@@ -565,7 +566,11 @@ class BridgeService : Service() {
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
         service.addCharacteristic(rx)
-        server.addService(service)
+
+        // openGattServer() 之后立刻 addService() 在部分机型上会失败（返回 false，
+        // 服务根本没进 GATT 表）。这时候如果广播照发，Mac 能扫到、能连上，
+        // 但 discoverServices 永远是 0 个服务——表现就是「连上了却收不到东西」。
+        addServiceWithRetry(server, service, 1)
 
         Link.server = server
         Link.txChar = tx
@@ -583,8 +588,24 @@ class BridgeService : Service() {
         // 正常路径：等 onServiceAdded 回调再广播（见上面）。
         // 兜底：个别机型不回调 onServiceAdded（或有延迟），3 秒后还没广播就自己上。
         handler.postDelayed({
+            if (!serviceReady) {
+                Link.log("⚠ 服务仍未就绪（onServiceAdded 没回来），广播照发但这台机器大概率发现不了服务")
+            }
             if (!advRunning) startAdvertise("服务回调超时兜底")
-        }, 3_000)
+        }, 6_000)
+    }
+
+    private var serviceReady = false
+
+    private fun addServiceWithRetry(server: BluetoothGattServer, service: BluetoothGattService, attempt: Int) {
+        val ok = try { server.addService(service) } catch (e: Exception) {
+            Link.log("addService 异常：${e.message}")
+            false
+        }
+        Link.log("addService 第 $attempt 次 → $ok")
+        if (!ok && attempt < 4) {
+            handler.postDelayed({ addServiceWithRetry(server, service, attempt + 1) }, 400L * attempt)
+        }
     }
 
     private var advertiser: BluetoothLeAdvertiser? = null
@@ -636,6 +657,7 @@ class BridgeService : Service() {
         Link.connected = false
         Link.resetSendState()
         Link.running = false
+        serviceReady = false
         Link.log("服务已停止（不再广播、不再转发）")
         super.onDestroy()
     }
