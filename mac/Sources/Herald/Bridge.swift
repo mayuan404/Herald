@@ -163,6 +163,7 @@ final class Bridge: NSObject, ObservableObject {
 
     /// 重连次数：指数退避用，连上就清零
     private var reconnectAttempts = 0
+    private var serviceRetries = 0
     /// 待回执（写无响应方式下受流控限制时排队）
     private var pendingAcks: [String] = []
     /// 已处理过的 msgId，用于防重放（手机端重发也会命中，属预期）
@@ -704,7 +705,25 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         Dbg.log("services=\(peripheral.services?.count ?? -1) err=\(error.map { String(describing: $0) } ?? "-")")
-        for s in peripheral.services ?? [] {
+        let services = peripheral.services ?? []
+        if services.isEmpty || !services.contains(where: { $0.uuid == Bridge.serviceUUID }) {
+            // 手机端 addService() 是异步的，服务表可能还没填好。
+            // 以前这里什么都不做，6 秒后就被超时逻辑当无效连接踢掉，
+            // 表现成「连上几秒就断」。给它重试几次。
+            if serviceRetries < 3 {
+                serviceRetries += 1
+                Dbg.log("服务表未就绪，1 秒后重试第 \(serviceRetries) 次")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self, self.connected, self.txChar == nil else { return }
+                    peripheral.discoverServices([Bridge.serviceUUID])
+                }
+            } else {
+                Dbg.log("服务表重试耗尽")
+            }
+            return
+        }
+        serviceRetries = 0
+        for s in services {
             peripheral.discoverCharacteristics([Bridge.txUUID, Bridge.rxUUID], for: s)
         }
     }

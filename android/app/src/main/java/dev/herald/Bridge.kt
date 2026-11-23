@@ -521,6 +521,19 @@ class BridgeService : Service() {
                 }
             }
 
+            override fun onServiceAdded(status: Int, service: BluetoothGattService?) {
+                // addService() 是异步的：在它真正完成前就广播，Mac 端连上来
+                // discoverServices 会拿到一张还没填好的服务表，于是找不到 tx
+                // 特征、订阅不上，几秒后被 Mac 端当成无效连接踢掉。
+                // 这是「连上几秒就断 + 发出去没回执」的来源。
+                Link.log("GATT 服务注册完成 status=$status uuid=${service?.uuid}")
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    startAdvertise("服务就绪")
+                } else {
+                    handler.postDelayed({ startAdvertise("服务注册失败重试") }, 1_500)
+                }
+            }
+
             override fun onNotificationSent(device: BluetoothDevice?, status: Int) {
                 // 用 status 判断这一片到底发出去没有；同时驱动下一片（流控）
                 Link.onChunkSent(status)
@@ -566,7 +579,12 @@ class BridgeService : Service() {
             .addServiceUuid(ParcelUuid(Link.serviceUUID))
             .setIncludeDeviceName(true)
             .build()
-        startAdvertise("启动广播")
+
+        // 正常路径：等 onServiceAdded 回调再广播（见上面）。
+        // 兜底：个别机型不回调 onServiceAdded（或有延迟），3 秒后还没广播就自己上。
+        handler.postDelayed({
+            if (!advRunning) startAdvertise("服务回调超时兜底")
+        }, 3_000)
     }
 
     private var advertiser: BluetoothLeAdvertiser? = null
