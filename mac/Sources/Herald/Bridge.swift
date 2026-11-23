@@ -164,6 +164,14 @@ final class Bridge: NSObject, ObservableObject {
     /// 重连次数：指数退避用，连上就清零
     private var reconnectAttempts = 0
     private var serviceRetries = 0
+
+    /// Mac 端还记着配对、手机端已经删掉时会返回 Code 14。
+    /// 这种情况自动重连没有意义，只会无限循环，得让用户去系统蓝牙里移除这台设备。
+    private func isStalePairing(_ error: Error?) -> Bool {
+        guard let e = error as NSError? else { return false }
+        return e.domain == CBErrorDomain && e.code == CBError.peerRemovedPairingInformation.rawValue
+    }
+
     /// 待回执（写无响应方式下受流控限制时排队）
     private var pendingAcks: [String] = []
     /// 已处理过的 msgId，用于防重放（手机端重发也会命中，属预期）
@@ -627,6 +635,15 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         Dbg.log("disconnected \(error.map { String(describing: $0) } ?? "-")")
+        if isStalePairing(error) {
+            Dbg.log("断开原因也是配对信息不一致（CBError 14）")
+            connected = false
+            txChar = nil
+            rxChar = nil
+            linkName = "配对失效：到「系统设置 → 蓝牙」移除这台手机后重试"
+            onChange?()
+            return
+        }
         connected = false
         linkName = "已断开，等待重连…"
         txChar = nil
@@ -679,6 +696,15 @@ extension Bridge: CBCentralManagerDelegate, CBPeripheralDelegate {
     /// 否则会停在「已断开，重连中…」再也不动。
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         Dbg.log("connect failed \(error.map { String(describing: $0) } ?? "-")")
+        if isStalePairing(error) {
+            Dbg.log("配对信息不一致（CBError 14）：需要手动移除系统蓝牙里的这台设备")
+            connected = false
+            txChar = nil
+            rxChar = nil
+            linkName = "配对失效：到「系统设置 → 蓝牙」移除这台手机后重试"
+            onChange?()
+            return  // 不自动重连：重试一万次也连不上
+        }
         connected = false
         txChar = nil
         rxChar = nil
