@@ -164,6 +164,7 @@ final class Bridge: NSObject, ObservableObject {
     /// 重连次数：指数退避用，连上就清零
     private var reconnectAttempts = 0
     private var serviceRetries = 0
+    private var stuckTicks = 0
 
     /// Mac 端还记着配对、手机端已经删掉时会返回 Code 14。
     /// 这种情况自动重连没有意义，只会无限循环，得让用户去系统蓝牙里移除这台设备。
@@ -256,8 +257,24 @@ final class Bridge: NSObject, ObservableObject {
                 return
             }
             self.lastStateLogged = central.state
-            if self.connected { return }
-            if self.peripheral != nil { return }   // 正在退避重连，交给 scheduleReconnect
+            if self.connected { self.stuckTicks = 0; return }
+            if self.peripheral != nil {
+                // 有 peripheral 却既不连也不扫，说明退避重连的定时器丢了。
+                // 以前这里直接 return，于是永久卡在「重连中」，什么也不做。
+                self.stuckTicks += 1
+                if self.stuckTicks >= 3 {   // 20s × 3 = 60 秒毫无进展
+                    Dbg.log("supervisor: 卡在 peripheral 上 60s 无进展 → 强制回到扫描")
+                    if let p = self.peripheral { central.cancelPeripheralConnection(p) }
+                    self.peripheral = nil
+                    self.reconnectAttempts = 0
+                    self.stuckTicks = 0
+                    self.linkName = "重新扫描中…"
+                    self.onChange?()
+                    self.startScan("supervisor 超时")
+                }
+                return
+            }
+            self.stuckTicks = 0
             if !self.isScanning || Date().timeIntervalSince(self.lastScanAt) > 60 {
                 if self.isScanning { central.stopScan(); self.isScanning = false }
                 self.startScan("supervisor")
